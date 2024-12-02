@@ -2,10 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
 use App\Models\WebhookAthena;
 use Exception;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class DocumentCenterController extends Controller
 {
@@ -16,7 +16,6 @@ class DocumentCenterController extends Controller
 
         // Validar o cabeçalho Authorization
         if (!$this->validateAuthorizationHeader($authorizationHeader)) {
-            Log::channel('webhook')->error('Unauthorized');
             // return response()->json(['error' => 'Unauthorized'], 401);
         }
 
@@ -45,8 +44,8 @@ class DocumentCenterController extends Controller
                     throw new Exception('Caminho de destino não existe: ' . $destinationFolder);
                 }
 
-                // Nome do arquivo a ser salvo composto de: codigoempresa-codigofilial-tipo-assunto
-                $fileName = $this->generateFileName($payload, $fileUrl);
+                // Nome do arquivo a ser salvo
+                $fileName = basename(parse_url($fileUrl, PHP_URL_PATH));
 
                 // Caminho completo do arquivo de destino
                 $destinationPath = $destinationFolder . DIRECTORY_SEPARATOR . $fileName;
@@ -68,50 +67,6 @@ class DocumentCenterController extends Controller
 
         // Retornar uma resposta ao remetente do webhook
         // return response()->json(['status' => 'success'], 200);
-    }
-
-    /**
-     * Gera o nome do arquivo baseado nos campos do payload.
-     *
-     * @param array $payload
-     * @param string $fileUrl
-     * @return string
-     */
-    private function generateFileName($payload, $fileUrl)
-    {
-        $codigoEmpresa = $payload['CODIGOEMPRESA'] ?? 'unknown_empresa';
-        $codigoFilial = $payload['CODIGOFILIAL'] ?? 'unknown_filial';
-        $tipo = $payload['TIPO'] ?? 'unknown_tipo';
-        $assunto = $payload['ASSUNTO'] ?? 'unknown_assunto';
-
-        // Sanitizar campos para evitar caracteres inválidos
-        $codigoEmpresa = $this->sanitizeFileName($codigoEmpresa);
-        $codigoFilial = $this->sanitizeFileName($codigoFilial);
-        $tipo = $this->sanitizeFileName($tipo);
-        $assunto = $this->sanitizeFileName($assunto);
-
-        // Obter a extensão do arquivo original
-        $fileExtension = pathinfo(parse_url($fileUrl, PHP_URL_PATH), PATHINFO_EXTENSION);
-
-        // Montar o nome do arquivo
-        $fileName = "{$codigoEmpresa}-{$codigoFilial}-{$tipo}-{$assunto}.{$fileExtension}";
-
-        return $fileName;
-    }
-
-    /**
-     * Salva os dados do webhook no banco de dados.
-     *
-     * @param array $payload
-     * @throws Exception
-     */
-    private function saveWebhookData($payload)
-    {
-        try {
-            WebhookAthena::create($payload);
-        } catch (Exception $e) {
-            Log::channel('webhook')->error('Erro ao salvar dados no banco de dados: ' . $e->getMessage());
-        }
     }
 
     /**
@@ -157,7 +112,7 @@ class DocumentCenterController extends Controller
         $cnpj = $payload['CNPJ'] ?? null;
 
         if (!$cnpj) {
-            Log::channel('webhook')->error('CNPJ não fornecido no payload.');
+            throw new Exception('CNPJ não fornecido no payload.');
         }
 
         // Sanitizar CNPJ
@@ -167,13 +122,14 @@ class DocumentCenterController extends Controller
         $clientFolder = $this->findClientFolder($basePath, $cnpj);
 
         if (!$clientFolder) {
-            Log::channel('webhook')->error('Pasta do cliente não encontrada para o CNPJ fornecido.');
+            throw new Exception('Pasta do cliente não encontrada para o CNPJ fornecido: ' . $cnpj);
+            Log::channel('webhook')->error('Pasta do cliente não encontrada para o CNPJ fornecido: ' . $cnpj);
         }
 
         // Obter MESANO
         $mesAno = $payload['MESANO'] ?? null;
         if (!$mesAno) {
-            Log::channel('webhook')->error('MESANO não fornecido no payload.');
+            throw new Exception('MESANO não fornecido no payload.');
         } else {
             // Assumindo MESANO no formato 'MMAAAA' com dois dígitos para o mês
             $mesAno = preg_replace('/\D/', '', $mesAno); // Remover caracteres não numéricos
@@ -189,7 +145,7 @@ class DocumentCenterController extends Controller
         // Obter departamento a partir de GRUPO
         $grupo = $payload['GRUPO'] ?? null;
         if (!$grupo) {
-            Log::channel('webhook')->error('GRUPO não fornecido no payload.');
+            throw new Exception('GRUPO não fornecido no payload.');
         }
         $department = $this->sanitizeFolderName($grupo);
 
@@ -225,22 +181,10 @@ class DocumentCenterController extends Controller
 
         // Verificar se o caminho de destino existe
         if (!file_exists($destinationPath) || !is_dir($destinationPath)) {
-            Log::channel('webhook')->error('Caminho de destino não existe: ' . $destinationPath);
+            throw new Exception('Caminho de destino não existe: ' . $destinationPath);
         }
 
         return $destinationPath;
-    }
-
-    /**
-     * Remove caracteres inválidos para nomes de pastas e arquivos.
-     *
-     * @param string $name
-     * @return string
-     */
-    private function sanitizeFileName($name)
-    {
-        // Remove caracteres inválidos para nomes de arquivos
-        return preg_replace('/[<>:"\/\\\|\?\*]/', '_', $name);
     }
 
     /**
@@ -252,6 +196,7 @@ class DocumentCenterController extends Controller
     private function sanitizeFolderName($name)
     {
         // Remove caracteres inválidos para nomes de pastas
+        // Substitui qualquer caractere inválido por underscore
         return preg_replace('/[<>:"\/\\\|\?\*]/', '_', $name);
     }
 
@@ -286,7 +231,7 @@ class DocumentCenterController extends Controller
     private function downloadAndSaveFile($fileUrl, $destinationPath)
     {
         // Baixar o arquivo e salvar no destino
-        $client = new \GuzzleHttp\Client();
+        $client = new \GuzzleHttp\Client(['verify' => false]); // Desabilita a verificação SSL para teste
         try {
             $response = $client->get($fileUrl, ['stream' => true]);
 
@@ -308,7 +253,21 @@ class DocumentCenterController extends Controller
 
             fclose($resource);
         } catch (\Exception $e) {
-            Log::channel('webhook')->error('Erro ao baixar e salvar o arquivo: ' . $e->getMessage());
+            Log::channel('webhook')->error('Erro ao baixar e salvar o arquivo:', [
+                'message' => $e->getMessage(),
+                'code' => $e->getCode(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            throw new Exception('Erro ao baixar e salvar o arquivo: ' . $e->getMessage());
+        }
+    }
+
+    private function saveWebhookData($payload)
+    {
+        try {
+            WebhookAthena::create($payload);
+        } catch (Exception $e) {
+            throw new Exception('Erro ao salvar dados no banco de dados: ' . $e->getMessage());
         }
     }
 }

@@ -10,4 +10,3 @@ Route::get('/user', function (Request $request) {
 
 Route::post('/webhook', [DocumentCenterController::class, 'handle']);
 Route::get('/ping', [DocumentCenterController::class, 'ping']);
-Route::post('/ping', [DocumentCenterController::class, 'ping']);
